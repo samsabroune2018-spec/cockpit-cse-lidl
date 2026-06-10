@@ -72,21 +72,51 @@ ENVELOPES = {
 DEFAULT_FILE = Path(__file__).parent / "data.xlsx"
 
 # ─── Chargement ────────────────────────────────────────────────────────────────
+def detect_file_type(xl: pd.ExcelFile) -> str:
+    """Détecte si le fichier est un export Pennylane natif ou le fichier Cockpit."""
+    names_lower = [s.lower() for s in xl.sheet_names]
+    # Pennylane natif : contient 'réalisé' ou 'realise' ET 'prévision'
+    has_realise  = any('alis' in n for n in names_lower)   # réalisé
+    has_prevision = any('vision' in n or 'pr' in n for n in names_lower)
+    has_plan     = any('tr' in n and ('so' in n or 'plan' in n) for n in names_lower)
+    # Cockpit : contient 'budget'
+    has_budget   = any('budget' in n for n in names_lower)
+    if has_budget:
+        return 'cockpit'
+    if has_realise and (has_prevision or has_plan):
+        return 'pennylane'
+    return 'pennylane'  # fallback
+
 @st.cache_data(show_spinner=False)
 def load_excel(file_bytes: bytes) -> dict:
     buf = io.BytesIO(file_bytes)
     xl  = pd.ExcelFile(buf)
+    ftype = detect_file_type(xl)
     sheets = {}
-    for target in ['RÉALISÉ','BUDGET','PLAN TRÉSO']:
-        matched = next((s for s in xl.sheet_names
-                        if all(c in s for c in target if c.isascii() and c.isalpha())), None)
-        if matched:
-            sheets[target] = pd.read_excel(buf, sheet_name=matched, header=None)
+
+    if ftype == 'cockpit':
+        # Fichier Cockpit généré par l'outil
+        for target in ['RÉALISÉ', 'BUDGET', 'PLAN TRÉSO']:
+            matched = next((s for s in xl.sheet_names
+                            if all(c in s for c in target if c.isascii() and c.isalpha())), None)
+            if matched:
+                sheets[target] = pd.read_excel(buf, sheet_name=matched, header=None)
+    else:
+        # Export Pennylane natif — mapper les onglets
+        for s in xl.sheet_names:
+            sl = s.lower()
+            if 'alis' in sl and 'plan' not in sl:          # "Réalisé"
+                sheets['RÉALISÉ'] = pd.read_excel(buf, sheet_name=s, header=None)
+            elif 'vision' in sl or ('pr' in sl and 'plan' not in sl):  # "Prévision"
+                sheets['BUDGET']  = pd.read_excel(buf, sheet_name=s, header=None)
+            elif 'plan' in sl or ('tr' in sl and 'so' in sl):          # "Plan de trésorerie"
+                sheets['PLAN TRÉSO'] = pd.read_excel(buf, sheet_name=s, header=None)
+
+    sheets['_type'] = ftype
     return sheets
 
 @st.cache_data(show_spinner=False)
 def load_csv(file_bytes: bytes) -> pd.DataFrame:
-    """Parse un export CSV Pennylane Plan de trésorerie."""
     try:
         df = pd.read_csv(io.BytesIO(file_bytes), sep=None, engine='python',
                          encoding='utf-8-sig', header=0)
@@ -94,30 +124,66 @@ def load_csv(file_bytes: bytes) -> pd.DataFrame:
         df = pd.read_csv(io.BytesIO(file_bytes), sep=';', encoding='latin-1', header=0)
     return df
 
-def parse_sheet(df) -> pd.DataFrame:
-    if df is None or df.shape[0] < 5 or df.shape[1] < 5:
+def find_header_row(df) -> int:
+    """Trouve la ligne d'en-tête qui contient les noms de mois."""
+    for ri in range(min(5, df.shape[0])):
+        row_str = ' '.join(str(v) for v in df.iloc[ri] if pd.notna(v))
+        if any(m in row_str for m in MONTHS + ['Mars','Avril','Juin','Juillet']):
+            return ri
+    return 0
+
+def parse_sheet(df, ftype='pennylane') -> pd.DataFrame:
+    if df is None or df.shape[0] < 3 or df.shape[1] < 2:
         return pd.DataFrame()
-    cat_col = 2
+
+    hdr_row = find_header_row(df)
+
+    # Chercher la colonne des catégories (première colonne non-vide avec du texte)
+    cat_col = 0
+    for ci in range(min(4, df.shape[1])):
+        col_vals = [str(v).strip() for v in df.iloc[hdr_row+1:, ci] if pd.notna(v)]
+        if len(col_vals) > 3 and any(len(v) > 4 for v in col_vals):
+            cat_col = ci
+            break
+
+    # Détecter les colonnes de mois
     month_cols = {}
-    headers = [str(v) if pd.notna(v) else '' for v in df.iloc[2,:]]
+    headers = [str(v) if pd.notna(v) else '' for v in df.iloc[hdr_row]]
     for ci, h in enumerate(headers):
         for mi, mn in enumerate(MONTHS):
-            if mn in h or MONTHS_S[mi] in h:
-                month_cols[mi] = ci
+            if mn in h:
+                # Pour Pennylane : prendre la colonne "Réalisé" du mois
+                # (éviter "À venir", "Projection", "Prévision" si plusieurs colonnes)
+                suffix = h.replace(mn, '').strip(' -')
+                if ftype == 'pennylane':
+                    if 'alis' in suffix.lower():   # Réalisé
+                        month_cols[mi] = ci
+                    elif mi not in month_cols:     # fallback si pas encore trouvé
+                        month_cols[mi] = ci
+                else:
+                    if mi not in month_cols:
+                        month_cols[mi] = ci
                 break
-    if not month_cols:
-        for mi in range(12): month_cols[mi] = 3 + mi
 
+    # Fallback si aucun mois détecté
+    if not month_cols:
+        for mi in range(min(12, df.shape[1] - cat_col - 1)):
+            month_cols[mi] = cat_col + 1 + mi
+
+    data_start = hdr_row + 1
     rows = []
-    for ri in range(3, df.shape[0]):
+    for ri in range(data_start, df.shape[0]):
         raw = df.iloc[ri, cat_col]
         label = str(raw).strip() if pd.notna(raw) else ''
-        if not label or label == 'nan': continue
-        clean = label.lstrip()
+        if not label or label == 'nan' or label == '': continue
+        clean  = label.lstrip()
         indent = len(label) - len(clean)
         niveau = min(indent // 2, 3)
-        vals = {mi: (float(df.iloc[ri,ci]) if pd.notna(df.iloc[ri,ci]) and df.iloc[ri,ci] != '' else 0.0)
-                for mi, ci in month_cols.items() if ci < df.shape[1]}
+        vals = {}
+        for mi, ci in month_cols.items():
+            if ci < df.shape[1]:
+                v = df.iloc[ri, ci]
+                vals[mi] = float(v) if pd.notna(v) and str(v).strip() not in ('', 'nan') else 0.0
         rows.append({'label': clean, 'niveau': niveau,
                      **{f'm{mi}': vals.get(mi, 0.0) for mi in range(12)}})
 
@@ -296,14 +362,20 @@ if not file_bytes:
 
 with st.spinner("Chargement..."):
     sheets  = load_excel(file_bytes)
-    real_df = parse_sheet(sheets.get('RÉALISÉ'))
-    bdgt_df = parse_sheet(sheets.get('BUDGET'))
+    ftype   = sheets.get('_type', 'pennylane')
+    real_df = parse_sheet(sheets.get('RÉALISÉ'), ftype)
+    bdgt_df = parse_sheet(sheets.get('BUDGET'),  ftype)
+
+    if ftype == 'pennylane':
+        st.sidebar.success("✅ Export Pennylane détecté et chargé")
+    else:
+        st.sidebar.success("✅ Fichier Cockpit chargé")
 
 # N-1
 real_n1 = None
 if uploaded_n1:
     sheets_n1 = load_excel(uploaded_n1.read())
-    real_n1   = parse_sheet(sheets_n1.get('RÉALISÉ'))
+    real_n1   = parse_sheet(sheets_n1.get('RÉALISÉ'), sheets_n1.get('_type', 'pennylane'))
 
 # CSV override
 if uploaded_csv:
