@@ -447,11 +447,11 @@ with cg1:
         else:
             treso_vals.append(None)
         if mi >= n_real - 1:
-            e = (row_ent[f'm{mi}'] if row_ent else 0) if mi < n_real else 0
-            s = (row_sor[f'm{mi}'] if row_sor else 0) if mi < n_real else 0
+            e = (row_ent[f'm{mi}'] if row_ent is not None else 0) if mi < n_real else 0
+            s = (row_sor[f'm{mi}'] if row_sor is not None else 0) if mi < n_real else 0
             avg_flux = (ent_cum - abs(sor_cum)) / max(n_real, 1)
             if mi == n_real - 1:
-                running = treso_vals[mi] if treso_vals[mi] else treso_act
+                running = treso_vals[mi] if treso_vals[mi] is not None else treso_act
             else:
                 running += avg_flux
             proj_vals.append(running)
