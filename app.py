@@ -273,12 +273,20 @@ st.divider()
 
 # ─── KPI CARDS ────────────────────────────────────────────────────────────────
 # Compute KPIs
-row_tdm = get_row(real_df, 'résorerie début') or get_row(real_df, 'but de mois')
-row_tfm = get_row(real_df, 'résorerie fin') or get_row(real_df, 'fin de mois')
-row_ent = get_row(real_df, 'ENTRÉES') or get_row(real_df, 'Entrées')
-row_sor = get_row(real_df, 'SORTIES') or get_row(real_df, 'Sorties')
-row_bann_ent = get_row(bdgt_df, 'ENTRÉES') or get_row(bdgt_df, 'Entrées')
-row_bann_sor = get_row(bdgt_df, 'SORTIES') or get_row(bdgt_df, 'Sorties')
+def get_row2(df, *fragments):
+    """Try multiple search fragments, return first match."""
+    for frag in fragments:
+        r = get_row(df, frag)
+        if r is not None:
+            return r
+    return None
+
+row_tdm      = get_row2(real_df, 'début de mois', 'but de mois', 'début')
+row_tfm      = get_row2(real_df, 'fin de mois', 'fin')
+row_ent      = get_row2(real_df, 'ENTR', 'Entr')
+row_sor      = get_row2(real_df, 'SORTI', 'Sorti')
+row_bann_ent = get_row2(bdgt_df, 'ENTR', 'Entr')
+row_bann_sor = get_row2(bdgt_df, 'SORTI', 'Sorti')
 
 treso_actuelle = row_tfm[f'm{n_real-1}'] if row_tfm is not None else 470450.89
 treso_debut    = row_tdm['m0'] if row_tdm is not None else 518635.71
